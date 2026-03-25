@@ -106,6 +106,6 @@ Python is the alternative — equally good SDK support, but daemon management an
 
 **No shell wrapping:** shy never interposes on your shell's stdin/stdout. Hooks are append-only observers. This avoids the fragility of tools like Butterfish that wrap the entire shell process.
 
-**CLAUDE.md awareness:** When the daemon detects a cwd change (from hook data), it checks for CLAUDE.md / .claude.md and includes project context in the next LLM query. This gives project-specific answers without manual configuration.
+**Own personality:** shy has its own `~/.config/shy/claude.md` that defines its character, expertise, and behavior — like Kai's memory but for the shell. It does NOT auto-load per-project CLAUDE.md files on cwd change. One personality, one companion.
 
-**Multi-session support:** Multiple terminals can connect to the same daemon. Each gets its own activity stream but shares the LLM session. Useful for users with tiled terminal setups.
+**Single unified context:** All terminal sessions feed into the same daemon, the same LLM conversation. shy sees commands from all your shells — tiled terminals, tmux panes, separate windows — and maintains one coherent picture of what you're doing.

@@ -1,6 +1,6 @@
 # shy — Shell AI Companion
 
-A persistent daemon that watches your shell activity, stays warm with an LLM session, and responds instantly when you need help.
+A persistent AI companion that lives in your terminal. Like having a second pair of eyes watching your shell — with its own personality, its own memory, and a single context across all your terminal sessions.
 
 ```
 $ make deploy && shy "what just failed?"
@@ -21,7 +21,7 @@ Every AI coding tool either:
 - **Has no shell context** (you paste manually) — ChatGPT, AIChat
 - **Bolts AI onto something else** (history tool, not a companion) — Atuin
 
-shy fills the gap: **terminal-agnostic + persistent context + instant response**.
+shy fills the gap: **a true companion** — one personality, one context across all shells, always watching, instantly available.
 
 ## How It Works
 
@@ -40,10 +40,10 @@ shy fills the gap: **terminal-agnostic + persistent context + instant response**
 ## Features
 
 - **Terminal-agnostic** — works in any terminal: WezTerm, Alacritty, kitty, iTerm2, plain xterm. No tmux required
-- **Persistent context** — daemon sees every command you run, knows your project, remembers the session
+- **One personality** — define who shy is in `~/.config/shy/claude.md` — its character, expertise, preferences. Your companion, your rules
+- **Single context** — one unified context across all terminal sessions. shy sees everything, remembers everything from this session
 - **Pipe-friendly** — `cat file | shy "explain"` or `shy "fix this" | pbcopy` — standard Unix citizen
 - **Warm session** — no 2-5s cold start on each query, LLM connection stays alive
-- **CLAUDE.md support** — reads project `.claude.md` / `CLAUDE.md` for project-specific context
 - **Multi-shell** — hooks for zsh (native), bash (via bash-preexec), fish (events)
 - **Private** — runs locally, your shell history never leaves your machine unless you ask
 
@@ -82,7 +82,7 @@ model = "sonnet"           # model shorthand
 
 [context]
 max_history = 500          # commands to keep in context
-project_files = true       # read CLAUDE.md / .claude.md
+personality = "~/.config/shy/claude.md"  # shy's personality and instructions
 
 [daemon]
 socket = "/tmp/shy.sock"   # Unix socket path
