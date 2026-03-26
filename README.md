@@ -1,15 +1,18 @@
 # shy — Shell AI Companion
 
-A persistent AI companion that lives in your terminal. It watches your shell activity, maintains a single context across all sessions, and responds instantly when you need help — no cold start, no copy-pasting, no tmux required.
+An AI companion that knows what's happening in your terminal. Shell hooks silently record your activity, and a warm daemon responds instantly when you need help — no cold start, no copy-pasting.
 
 ```
-$ make deploy && shy "what just failed?"
-→ Deploy failed: migrations not applied. Run: make db-migrate && make deploy
+$ make deploy
+...error: relation "users" does not exist
 
-$ cat error.log | shy "explain"
+$ shy what just failed
+→ Deploy failed: the "users" table doesn't exist. Run: make db-migrate && make deploy
+
+$ cat error.log | shy explain these errors
 → Connection pool exhausted — 50 idle transactions holding connections. Look for uncommitted BEGIN blocks.
 
-$ shy "compress all jpgs in subdirs, parallel"
+$ shy compress all jpgs in subdirs using parallel
 → find . -name '*.jpg' | parallel -j8 jpegoptim --strip-all
 ```
 
@@ -22,47 +25,66 @@ Every AI shell tool makes you choose:
 - **No shell context** (you paste manually) — ChatGPT, AIChat
 - **AI bolted onto something else** (history tool, not a companion) — Atuin
 
-shy is different: **one companion, one context, all your shells, any terminal**.
+shy is different: **hooks record everything, a warm daemon answers instantly, any terminal**.
 
 ## How It Works
 
 ```
-┌─────────────┐     preexec/precmd hooks      ┌──────────────┐
-│  Your Shell  │ ─────────────────────────────▸│  shy daemon  │
-│  (zsh/bash/  │                               │  (warm LLM   │
-│   fish/any)  │◂─────────────────────────────  │   session)   │
-└─────────────┘     shy "question" / pipe      └──────────────┘
+┌─────────────┐  preexec/precmd   ┌────────────┐
+│  Your Shell  │ ────────────────▸ │  Log File  │
+│  (zsh/bash/  │                   │  (~/.local/ │
+│   fish/any)  │                   │  share/shy) │
+└─────────────┘                    └─────┬──────┘
+                                         │
+$ shy why did it fail                    │
+       │                                 │
+       ▼                                 │
+┌─────────────┐  reads history     ┌─────┘
+│ shy daemon  │◂───────────────────┘
+│ (warm SDK   │
+│  session)   │──▸ streamed response to stdout
+└─────────────┘
 ```
 
-1. **Shell hooks** stream every command and exit code to the daemon via Unix socket. Lightweight, fire-and-forget — if the daemon isn't running, nothing happens.
-2. **Daemon** stays resident, keeps an LLM session warm, and maintains a unified picture of your activity across all terminals.
-3. **CLI** sends your question to the daemon and streams the response back. No cold start — the LLM already knows what you've been doing.
+1. **Shell hooks** append every command and exit code to a log file. Lightweight, fire-and-forget — no data goes to the LLM until you ask.
+2. **Daemon** stays resident with a warm Claude SDK connection and your personality loaded. No shell data flows into it until needed.
+3. When you run `shy <prompt>`, the daemon reads as much history as it needs from the log, combines it with your question, and streams the response.
+
+The key insight: shell activity is *recorded* continuously but only *sent to Claude* on demand. No wasted tokens on commands you never ask about.
 
 ## Features
 
 - **Terminal-agnostic** — WezTerm, Alacritty, kitty, iTerm2, xterm, anything. No tmux required.
-- **Own personality** — shy has its own instruction file (`~/.config/shy/shy.md`). Define its expertise, tone, and behavior. Your companion, your rules.
-- **Single context** — all terminal sessions feed into one daemon. Open three terminals? shy sees them all as one continuous workflow.
-- **Pipe-friendly** — `cat file | shy "explain"` or `shy "fix" | xclip`. Standard Unix citizen.
-- **Warm session** — daemon keeps the LLM connection alive. No 2–5s startup on each query.
+- **Instant response** — daemon keeps Claude connection warm. No 2–5s cold start per query.
+- **Own personality** — shy has its own instruction file (`~/.config/shy/shy.md`). Define its expertise, tone, and behavior.
+- **Single context** — hooks from all terminal sessions write to the same log. shy sees your complete workflow.
+- **No quotes needed** — arguments are always a prompt: `shy why did this fail` not `shy "why did this fail"`.
+- **Pipe-friendly** — `cat file | shy explain this` or `shy fix the command | xclip`. Standard Unix citizen.
 - **Multi-shell** — native hooks for zsh, bash (via bash-preexec), and fish.
 - **Private** — runs locally. Shell history stays on your machine.
+- **Claude-powered** — uses the Anthropic SDK directly. One provider, done right.
 
 ## Usage
 
 ```bash
 # Ask about what just happened
-shy "why did that fail?"
+shy why did that fail
 
 # Pipe data for analysis
-cat logs/app.log | shy "summarize the errors"
-kubectl get pods | shy "which pods are crashing?"
+cat logs/app.log | shy summarize the errors
+kubectl get pods | shy which pods are crashing
 
 # Get command suggestions
-shy "find files larger than 100MB modified this week"
+shy find files larger than 100MB modified this week
 
 # Chain with other tools
-shy "write a commit message for staged changes" | git commit -F -
+shy write a commit message for staged changes | git commit -F -
+
+# Manage the daemon
+shy daemon start|stop|status
+
+# Install hooks for your shell
+shy install
 ```
 
 ## Configuration
@@ -70,22 +92,24 @@ shy "write a commit message for staged changes" | git commit -F -
 `~/.config/shy/config.toml`:
 
 ```toml
-[llm]
-provider = "anthropic"     # anthropic, openai, ollama
-model = "sonnet"           # model shorthand
+[claude]
+model = "sonnet"           # claude model shorthand
 
 [context]
-max_history = 500          # commands to keep in rolling buffer
+max_history = 500          # max recent commands to include per query
 personality = "~/.config/shy/shy.md"
 
 [daemon]
 socket = "/tmp/shy.sock"
 idle_timeout = "4h"        # auto-stop after inactivity
+
+[history]
+path = "~/.local/share/shy/history.log"
 ```
 
 ## Personality File
 
-`~/.config/shy/shy.md` defines who shy is — like a system prompt that persists:
+`~/.config/shy/shy.md` defines who shy is:
 
 ```markdown
 You are a senior DevOps engineer. Be concise — one-liners when possible,
@@ -93,15 +117,14 @@ longer explanations only when asked. Prefer standard coreutils over
 installing new tools. When suggesting commands, always explain flags.
 ```
 
-This file is loaded once when the daemon starts. Change it and restart the daemon to update.
-
 ## Install
 
 ```bash
 # Coming soon
 shy install    # detects your shell, installs hooks
-shy daemon start
 ```
+
+Auto-starts the daemon on first `shy` query. Requires `ANTHROPIC_API_KEY` or key in config.
 
 ## Docs
 
