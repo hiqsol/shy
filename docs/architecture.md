@@ -1,6 +1,6 @@
 # Architecture
 
-shy has three components: shell hooks, a daemon, and a CLI.
+shy has three components: shell hooks, an MCP server, and a CLI.
 
 ## Shell Hooks
 
@@ -30,42 +30,64 @@ function shy_postexec --on-event fish_postexec
 end
 ```
 
-Hooks write to a plain text log file — not to the daemon, not to an LLM. If the log file or directory doesn't exist, the write fails silently. Zero impact on shell performance.
+Hooks write to a plain text log file — not to any LLM, not to any daemon. If the log file doesn't exist, the write fails silently. Zero impact on shell performance.
 
-## Daemon
+## MCP Server
 
-Long-running background process with one job: keep a Claude SDK session warm and ready.
+shy exposes shell history as MCP (Model Context Protocol) resources. Claude Code (or any MCP-compatible client) connects to it.
 
-**What the daemon does:**
-- Maintains a warm connection to the Claude API (no cold start on queries)
-- Loads the personality file (`~/.config/shy/shy.md`) on startup
-- Listens on a Unix socket for queries from the CLI
-- On each query: reads relevant history from the log file, builds a prompt, sends to Claude, streams response back
+**Resources exposed:**
+- `shell://history` — recent commands with exit codes, cwd, timestamps
+- `shell://last-command` — the most recent command and its exit code
+- `shell://errors` — recent failed commands (exit code ≠ 0)
 
-**What the daemon does NOT do:**
-- Does not receive shell activity from hooks (hooks write to a file, not the daemon)
-- Does not keep shell history in LLM context between queries (only loads what's needed per query)
-- Does not waste tokens on commands you never ask about
+**Tools exposed:**
+- `get_shell_history(n)` — last N commands from the log
+- `get_command_output(timestamp)` — output for a specific command (Tier 2 only, from `script` log)
+- `search_history(pattern)` — grep through command history
 
-**Lifecycle:**
+The MCP server reads the log file on demand — it doesn't accumulate state or maintain an LLM context. Each request is a fresh read.
+
+**Running the server:**
+```bash
+shy mcp-server          # stdio transport (for Claude Code integration)
 ```
-shy daemon start     # background, writes PID to /tmp/shy.pid
-shy daemon stop      # graceful shutdown
-shy daemon status    # running? PID? uptime?
+
+**Claude Code config** (`~/.claude.json`):
+```json
+{
+  "mcpServers": {
+    "shy": {
+      "command": "shy",
+      "args": ["mcp-server"]
+    }
+  }
+}
 ```
 
-Auto-starts on first `shy` query if not already running. Auto-stops after configurable idle timeout (default 4h).
+Once configured, Claude Code automatically has access to your shell history when answering questions — no special prompt needed.
 
 ## CLI
 
-Thin client. Sends the user's prompt to the daemon via Unix socket, streams the response to stdout.
+Thin client that routes prompts to Claude Code. No SDK, no API keys, no daemon.
 
 ```
 shy why did it fail           # all args are the prompt, no quotes needed
 echo data | shy explain this  # pipe + prompt
-shy daemon start|stop|status  # manage daemon
 shy install                   # detect shell, install hooks
+shy mcp-server                # start MCP server (stdio)
 ```
+
+**How the CLI routes to Claude Code:**
+
+```bash
+# Simplified: what shy does internally
+claude -p --continue "$(shy mcp-context) $USER_PROMPT"
+```
+
+shy prepends recent shell context to the user's prompt and sends it to Claude Code via `claude -p --continue`. The `--continue` flag reuses the existing Claude Code session, preserving project context.
+
+If piped data is present (`echo data | shy explain`), it's included in the prompt as well.
 
 ## Data Flow
 
@@ -75,46 +97,57 @@ shy install                   # detect shell, install hooks
 │  (preexec)   │                   │  (append-only)  │
 └─────────────┘                    └───────┬────────┘
                                            │
-shy why did it fail                        │ read on demand
+                                    ┌──────┴───────┐
+                                    │  MCP Server   │
+                                    │  (reads log)  │
+                                    └──────┬───────┘
+                                           │
+shy why did it fail                        │
        │                                   │
        ▼                                   ▼
 ┌──────────────────────────────────────────────┐
-│                  Daemon                       │
+│              Claude Code                      │
 │                                               │
 │  ┌────────────┐     ┌─────────────────────┐  │
-│  │ Personality │     │ Claude SDK (warm)   │  │
-│  │ (shy.md)    │────▸│                     │  │
-│  └────────────┘     │ history + prompt ──▸ │  │
-│                      │ ◂── streamed tokens │  │
-│                      └─────────────────────┘  │
+│  │ Project     │     │  shy MCP resources  │  │
+│  │ context     │────▸│  + user prompt      │  │
+│  │ (CLAUDE.md, │     │                     │  │
+│  │  files,git) │     │  ──▸ response       │  │
+│  └────────────┘     └─────────────────────┘  │
 └───────────────────────────┬──────────────────┘
                             ▼
-                     Streamed Response
-                     back to CLI → stdout
+                     Response to stdout
 ```
 
 ## Design Decisions
 
-**Hooks write to file, not daemon.** Shell activity is recorded continuously but only sent to Claude on demand. This means: no wasted tokens, no context pollution, and hooks work even when the daemon is stopped.
+**Claude Code is the brain.** shy doesn't need its own LLM connection, API keys, or daemon. Claude Code already runs on the user's machine, already knows the project context (files, git history, CLAUDE.md), already has tools (Bash, file editing, web search). shy just gives it shell awareness via MCP.
 
-**Daemon is a warm connection, not a context store.** The daemon's value is eliminating cold start latency. It doesn't accumulate shell history in the LLM conversation — each query builds its own context from the log file. This keeps token usage predictable.
+**MCP for integration.** The Model Context Protocol is the standard way to extend Claude Code with new capabilities. By exposing shell history as MCP resources, shy integrates cleanly without custom protocols. Any MCP-compatible client benefits — not just Claude Code.
 
-**Unix socket for CLI↔daemon.** Lower latency than HTTP, no port conflicts, natural access control via file permissions. If the socket doesn't exist, the daemon isn't running — clean failure mode.
+**Hooks write to file, not to an LLM.** Shell activity is recorded continuously but only sent to Claude on demand. This means: no wasted tokens, no context pollution, and hooks work even when Claude Code isn't running.
+
+**No daemon.** The previous architecture had a daemon to keep an LLM session warm. With Claude Code as the brain, this is unnecessary — Claude Code manages its own sessions. shy is stateless.
 
 **Plain text log file.** Append-only, one line per event, human-readable. Easy to inspect (`tail -f`), easy to rotate, no database dependency. Format: `<ISO-timestamp> CMD|EXIT <data>`.
 
 **No quotes on arguments.** Everything after `shy` is the prompt. `shy why did this fail` works — no need for `shy "why did this fail"`. Shell glob/expansion edge cases are handled by treating argv as-is.
 
-**Own personality file.** shy loads `~/.config/shy/shy.md` as the system prompt. One companion, one personality. Does not auto-load per-project instruction files.
+**Single log across all shells.** All terminal sessions — tiled terminals, tmux panes, separate windows — write to the same log file. Via MCP, Claude Code sees the complete picture across all shells.
 
-**Single log across all shells.** All terminal sessions — tiled terminals, tmux panes, separate windows — write to the same log file. When shy reads history, it sees the complete picture of what's happening across all shells.
-
-**Claude SDK only.** Uses the Anthropic SDK directly. No abstraction layer for multiple providers — one integration, done right.
+**Two-tier capture.** Tier 1 (hooks only) is zero-overhead and captures commands. Tier 2 (`script(1)` wrapper) captures full output for users who want it. See [Output Capture](docs/output-capture.md).
 
 ## Language Choice
 
 TypeScript (Bun preferred):
-- First-class Anthropic SDK
+- First-class MCP SDK (`@modelcontextprotocol/sdk`)
 - Built-in Unix socket support
 - Natural streaming via async iterators
 - Single binary distribution via `bun build --compile`
+
+## What shy is NOT
+
+- **Not a terminal emulator** — shy doesn't replace your terminal (unlike Warp)
+- **Not a shell wrapper** — shy doesn't wrap or intercept your shell (unlike Butterfish)
+- **Not an LLM client** — shy doesn't call Claude directly. Claude Code does.
+- **Not a daemon** — shy is stateless. Start it, use it, done.
