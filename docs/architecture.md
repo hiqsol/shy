@@ -1,12 +1,12 @@
 # Architecture
 
-## Components
+shy has three components: shell hooks, a daemon, and a CLI.
 
-### 1. Shell Hooks
+## Shell Hooks
 
-Lightweight hooks injected into the user's shell that stream activity to the daemon.
+Minimal hooks injected into the user's shell. They stream commands and exit codes to the daemon via Unix socket.
 
-**Zsh** — native `preexec` / `precmd`:
+**Zsh** — native `preexec`/`precmd`:
 ```zsh
 shy_preexec()  { echo "CMD:$1" | socat - UNIX-CONNECT:/tmp/shy.sock 2>/dev/null; }
 shy_precmd()   { echo "EXIT:$?" | socat - UNIX-CONNECT:/tmp/shy.sock 2>/dev/null; }
@@ -30,39 +30,40 @@ function shy_postexec --on-event fish_postexec
 end
 ```
 
-Hooks are fire-and-forget — if the daemon isn't running, the `socat` call fails silently with no impact on shell performance.
+Hooks are fire-and-forget. If the daemon isn't running, `socat` fails silently — zero impact on shell performance.
 
-### 2. Daemon
+## Daemon
 
-Long-running process that:
-- Listens on a Unix socket for hook events and CLI queries
-- Maintains a rolling buffer of shell activity (commands, exit codes, timestamps, cwd)
-- Keeps an LLM session warm (persistent connection, conversation context)
-- Reads project context files (CLAUDE.md) when cwd changes
-- Handles concurrent queries from multiple shell sessions
+Long-running background process. Responsibilities:
+
+- Listen on a Unix socket for hook events and CLI queries
+- Maintain a rolling buffer of shell activity (commands, exit codes, timestamps, cwd)
+- Keep an LLM session warm (persistent connection, conversation history)
+- Load the personality file (`~/.config/shy/shy.md`) on startup
+- Handle input from multiple concurrent shell sessions
 
 **Lifecycle:**
 ```
-shy daemon start     # starts in background, writes PID to /tmp/shy.pid
-shy daemon stop      # graceful shutdown
-shy daemon status    # check if running
+shy daemon start     # background, writes PID to /tmp/shy.pid
+shy daemon stop      # graceful shutdown, saves context to disk
+shy daemon status    # running? PID? uptime?
 ```
 
-Auto-starts on first `shy` invocation if not running. Auto-stops after configurable idle timeout (default 4h).
+Auto-starts on first `shy` query if not already running. Auto-stops after configurable idle timeout (default 4h).
 
-### 3. CLI
+## CLI
 
-The user-facing command. Thin client that sends queries to the daemon via Unix socket.
+Thin client. Connects to the daemon socket, sends a query, streams the response to stdout.
 
 ```
-shy "question"              # ask about shell context
-echo data | shy "prompt"    # pipe + question
-shy --no-context "prompt"   # skip shell history, just LLM
-shy install                 # set up hooks for current shell
-shy daemon start|stop|status
+shy "question"                # ask with full shell context
+echo data | shy "prompt"      # pipe + question
+shy --no-context "prompt"     # raw LLM query, skip shell history
+shy install                   # detect shell, install hooks
+shy daemon start|stop|status  # manage daemon
 ```
 
-**Response streaming:** daemon streams tokens back over the socket, CLI prints them as they arrive — feels instant.
+Tokens stream back over the socket as they arrive — feels instant.
 
 ## Data Flow
 
@@ -88,24 +89,24 @@ Shell Hook (preexec)           CLI Query
                    back to CLI
 ```
 
+## Design Decisions
+
+**Unix socket over HTTP.** Lower latency, no port conflicts, natural access control via file permissions. If the socket file doesn't exist, the daemon isn't running — clean failure mode.
+
+**Ring buffer for context.** Fixed-size (default 500 entries). Old commands drop off naturally. No unbounded memory growth. Serialized to disk on daemon shutdown, restored on start.
+
+**No shell wrapping.** shy never interposes on stdin/stdout. Hooks are append-only observers. This avoids the fragility of tools like Butterfish that wrap the entire shell process and break on TUI applications.
+
+**Own personality file.** shy loads `~/.config/shy/shy.md` once at startup as the system prompt. It does not scan for or auto-load project-specific instruction files when the working directory changes. One companion, one personality, one context.
+
+**Single unified context.** All terminal sessions — tiled terminals, tmux panes, separate windows — feed into the same daemon and the same LLM conversation. shy maintains one coherent picture of everything happening across your shells.
+
 ## Language Choice
 
-Node.js/TypeScript preferred:
-- Anthropic SDK is first-class
-- Unix socket support built-in (`net` module)
-- Streaming is natural (async iterators)
-- Single binary via `pkg` or `bun build --compile`
+TypeScript (Node.js or Bun):
+- First-class Anthropic SDK
+- Built-in Unix socket support (`net` module)
+- Natural streaming via async iterators
+- Single binary distribution via `bun build --compile`
 
-Python is the alternative — equally good SDK support, but daemon management and binary distribution are harder.
-
-## Key Design Decisions
-
-**Unix socket over HTTP:** Lower latency, no port conflicts, natural access control (file permissions). Falls back gracefully — if socket doesn't exist, daemon isn't running.
-
-**Ring buffer for context:** Fixed-size (default 500 commands). Old commands fall off naturally. No unbounded memory growth. Serialized to disk on shutdown, restored on start.
-
-**No shell wrapping:** shy never interposes on your shell's stdin/stdout. Hooks are append-only observers. This avoids the fragility of tools like Butterfish that wrap the entire shell process.
-
-**Own personality:** shy has its own `~/.config/shy/claude.md` that defines its character, expertise, and behavior — like Kai's memory but for the shell. It does NOT auto-load per-project CLAUDE.md files on cwd change. One personality, one companion.
-
-**Single unified context:** All terminal sessions feed into the same daemon, the same LLM conversation. shy sees commands from all your shells — tiled terminals, tmux panes, separate windows — and maintains one coherent picture of what you're doing.
+Python is an alternative with equally good SDK support, but daemon management and single-binary distribution are more complex.
