@@ -120,15 +120,19 @@ installing new tools. When suggesting commands, always explain flags.
 ## Install
 
 ```bash
-# Coming soon
-shy install    # detects your shell, installs hooks
+shy install          # hooks only: commands, exit codes, cwd, timestamps
+shy install --full   # hooks + script(1) wrapper: captures command output too
 ```
+
+Tier 1 (default) adds lightweight shell hooks — zero overhead, no output capture.
+Tier 2 (`--full`) wraps your session in `script(1)` — one PTY layer (same as tmux), captures everything. See [Output Capture](docs/output-capture.md) for the full analysis.
 
 Auto-starts the daemon on first `shy` query. Requires `ANTHROPIC_API_KEY` or key in config.
 
 ## Docs
 
 - [Architecture](docs/architecture.md) — components, data flow, design decisions
+- [Output Capture](docs/output-capture.md) — how shy captures command output, all approaches compared
 - [Competitive Landscape](docs/landscape.md) — how shy compares to existing tools
 
 ## Status
